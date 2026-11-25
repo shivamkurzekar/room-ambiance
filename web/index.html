@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0a0b10">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Ambiance">
+  <title>Ambiance</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='12' fill='%23ff9a4d'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-orb" aria-hidden="true"></span>
+        <span class="brand-name">Ambiance</span>
+      </div>
+      <div class="pills" id="pills" aria-live="polite"></div>
+      <div class="top-actions">
+        <div class="timer-wrap">
+          <button class="icon-btn" id="timerBtn" aria-haspopup="true" aria-expanded="false" title="Sleep timer">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5Z"/></svg>
+            <span id="timerLabel" class="timer-label"></span>
+          </button>
+          <div class="popover" id="timerPop" hidden>
+            <div class="popover-title">Sleep timer</div>
+            <p class="muted small">Lights fade out over the last minute, then turn off.</p>
+            <div class="chip-row" id="timerOptions"></div>
+            <button class="btn ghost full" id="timerCancel" hidden>Cancel timer</button>
+          </div>
+        </div>
+        <button class="power-btn" id="masterPower" aria-pressed="false" title="All lights on or off">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v8M6.3 6.3a8 8 0 1 0 11.4 0"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="layout">
+      <section class="stage" aria-label="Live preview">
+        <div class="stage-card">
+          <canvas id="preview" aria-label="Live preview of the strip and bulb"></canvas>
+          <div class="stage-meta">
+            <div>
+              <div class="eyebrow">Now</div>
+              <div class="now" id="nowPlaying">Custom</div>
+            </div>
+            <label class="switch-row" title="The bulb mirrors the strip's colors">
+              <span>Sync bulb</span>
+              <input type="checkbox" class="switch" id="linkToggle">
+            </label>
+          </div>
+        </div>
+        <div class="banner warn" id="ambilightBanner" hidden></div>
+        <div class="banner" id="dryRunBanner" hidden>Dry run: the server isn't sending anything to the lights.</div>
+      </section>
+
+      <div class="controls">
+        <nav class="tabs" role="tablist" aria-label="Sections">
+          <button role="tab" data-tab="scenes" aria-selected="true">Ambiances</button>
+          <button role="tab" data-tab="strip" aria-selected="false">Strip</button>
+          <button role="tab" data-tab="bulb" aria-selected="false">Bulb</button>
+          <button role="tab" data-tab="settings" aria-selected="false">Settings</button>
+        </nav>
+        <main>
+          <section class="panel" id="panel-scenes" role="tabpanel"></section>
+          <section class="panel" id="panel-strip" role="tabpanel" hidden></section>
+          <section class="panel" id="panel-bulb" role="tabpanel" hidden></section>
+          <section class="panel" id="panel-settings" role="tabpanel" hidden></section>
+        </main>
+      </div>
+    </div>
+  </div>
+
+  <div class="offline" id="offline" hidden>
+    <div class="offline-card">
+      <div class="spinner" aria-hidden="true"></div>
+      <div>Reconnecting to the ambiance server...</div>
+    </div>
+  </div>
+  <div class="toasts" id="toasts" aria-live="assertive"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

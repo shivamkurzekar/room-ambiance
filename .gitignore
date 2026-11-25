@@ -1,0 +1,13 @@
+# Local settings and saved state
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS / editors
+.DS_Store
+.vscode/
+.idea/
