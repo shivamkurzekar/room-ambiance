@@ -22,7 +22,7 @@ from .catalog import AMBIANCE_BY_ID, AMBIANCES, WIZ_SCENE_COLOR, WIZ_SCENE_IDS, 
 from .color import (PALETTE_HEX, average, clamp, hex_to_rgb, is_hex_color, kelvin_to_rgb,
                     normalize_hex, rgb_to_hex, scale)
 from .config import MAX_LEDS, load_config, save_json
-from .devices import (AmbilightMonitor, StripOutput, WizBulb, detect_local_ip, discover_bulbs,
+from .devices import (LOOPBACK, AmbilightMonitor, StripOutput, WizBulb, detect_local_ip, discover_bulbs,
                       rgb_to_wiz)
 from .effects import EFFECTS, Ctx, get_effect, speed_to_rate
 from .effects import catalog as effect_catalog
@@ -480,14 +480,39 @@ class Engine:
         return scale(hex_to_rgb(b["color"]), k)
 
     # ---------------------------------------------------------------- render loop
+    def refresh_network(self) -> bool:
+        """Re-detect this machine's LAN address and move the outputs to it if it changed.
+
+        At boot the service can start before WiFi is up, when the only address is the
+        loopback 127.0.0.1; multicast pinned to that never reaches the strip. Checking
+        regularly also covers WiFi reconnects and a new DHCP lease. Returns True on change.
+        """
+        if self.cfg["interface_ip"]:
+            return False
+        ip = detect_local_ip(self.cfg["bulb_ip"])
+        if ip == self.local_ip or ip == LOOPBACK:
+            return False
+        log.info("Network address is now %s (was %s); strip output moved to it", ip, self.local_ip)
+        with self.lock:
+            self.local_ip = ip
+            self.strip_out.set_interface(ip)
+            self.monitor.set_interface(ip)
+            self._last_wire = None      # resend the current frame right away
+        return True
+
     def _run(self) -> None:
         last = time.monotonic()
         next_preview = 0.0
+        next_net_check = 0.0
         while not self._stop.is_set():
             start = time.monotonic()
             dt = min(0.25, start - last)
             last = start
             try:
+                if start >= next_net_check:
+                    next_net_check = start + (2.0 if self.local_ip == LOOPBACK else 5.0)
+                    if self.refresh_network():
+                        self._changed()
                 display = self._tick(start, dt)
                 if start >= next_preview:
                     next_preview = start + 1.0 / PREVIEW_FPS

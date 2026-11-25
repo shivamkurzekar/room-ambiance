@@ -221,6 +221,25 @@ class EngineTests(unittest.TestCase):
         b = e.snapshot()["bulb"]
         self.assertEqual((b["mode"], b["temp"]), ("white", 3000))
 
+    def test_strip_output_moves_off_loopback_once_wifi_is_up(self):
+        """Boot race: the service starts before WiFi, so it first sees only 127.0.0.1."""
+        from unittest import mock
+        e = self.engine
+        e.local_ip = "127.0.0.1"
+        e.strip_out.set_interface("127.0.0.1")
+        with mock.patch("ambiance.engine.detect_local_ip", return_value="127.0.0.1"):
+            self.assertFalse(e.refresh_network())       # still no network: stay put
+        real_ip = __import__("ambiance.devices", fromlist=["x"]).detect_local_ip("192.168.0.1")
+        if real_ip == "127.0.0.1":
+            self.skipTest("this machine has no LAN address to move to")
+        with mock.patch("ambiance.engine.detect_local_ip", return_value=real_ip):
+            self.assertTrue(e.refresh_network())
+            self.assertFalse(e.refresh_network())       # no change the second time
+        self.assertEqual(e.local_ip, real_ip)
+        self.assertEqual(e.strip_out.local_ip, real_ip)
+        self.assertEqual(e.monitor.local_ip, real_ip)
+        self.assertEqual(e.snapshot()["server"]["local_ip"], real_ip)
+
     def test_timer_turns_everything_off(self):
         e = self.engine
         e.update_strip({"power": True})

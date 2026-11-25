@@ -15,14 +15,22 @@ from .color import RGB, clamp
 log = logging.getLogger("ambiance.devices")
 
 
+LOOPBACK = "127.0.0.1"
+
+
 def detect_local_ip(probe_ip: str = "192.168.0.1") -> str:
-    """Return the LAN address the OS would use to reach probe_ip (no traffic is sent)."""
+    """Return the LAN address the OS would use to reach probe_ip (no traffic is sent).
+
+    Returns 127.0.0.1 while there's no network yet (for example during boot, before WiFi
+    has connected). Callers must treat that as "not ready" and check again later.
+    """
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect((probe_ip, 9))
-        return s.getsockname()[0]
+        ip = s.getsockname()[0]
+        return ip if ip and ip != "0.0.0.0" else LOOPBACK
     except OSError:
-        return "127.0.0.1"
+        return LOOPBACK
     finally:
         s.close()
 
@@ -48,10 +56,16 @@ class StripOutput:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
         self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
+        self.local_ip = ""
+        self.set_interface(local_ip)
+
+    def set_interface(self, local_ip: str) -> None:
+        """Send multicast out of the interface that owns local_ip (re-run when it changes)."""
         try:
             self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(local_ip))
+            self.local_ip = local_ip
         except OSError as e:
-            log.warning("could not pin multicast to %s: %s", local_ip, e)
+            log.warning("could not send multicast via %s: %s", local_ip, e)
 
     @classmethod
     def build_packet(cls, seq: int, rgb: bytes, t_us: int) -> bytes:
@@ -82,6 +96,7 @@ class AmbilightMonitor:
     """Listens on the strip's multicast group to notice another sender (the PC ambilight)."""
 
     def __init__(self, group: str, port: int, local_ip: str):
+        self.group = group
         self.local_ip = local_ip
         self.sources: dict[str, float] = {}
         self._stop = threading.Event()
@@ -103,6 +118,22 @@ class AmbilightMonitor:
     def start(self):
         if self.ok:
             self.thread.start()
+
+    def set_interface(self, local_ip: str) -> None:
+        """Move the group membership to a new interface (e.g. once WiFi is up)."""
+        if not self.ok or local_ip == self.local_ip:
+            return
+        old = socket.inet_aton(self.group) + socket.inet_aton(self.local_ip)
+        try:
+            self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_DROP_MEMBERSHIP, old)
+        except OSError:
+            pass  # the old interface may already be gone
+        try:
+            new = socket.inet_aton(self.group) + socket.inet_aton(local_ip)
+            self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, new)
+        except OSError as e:
+            log.warning("ambilight monitor could not join on %s: %s", local_ip, e)
+        self.local_ip = local_ip
 
     def _loop(self):
         while not self._stop.is_set():
