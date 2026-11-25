@@ -131,17 +131,37 @@ function makeSender(path) {
 const sendStrip = makeSender("/api/strip");
 const sendBulb = makeSender("/api/bulb");
 
-function setStrip(patch) {
-  state.strip = deepMerge(state.strip, patch);
-  state.ambiance = null;
-  sendStrip(patch);
+// Changes the user just made that the server hasn't confirmed yet. Every incoming server
+// state is overlaid with them, so an update that left the server before the click can't
+// flip a switch back. Holds expire on their own, after which the server's state wins.
+const HOLD_MS = 1500;
+let holds = [];
+let serverState = null;
+
+function applyHolds(incoming) {
+  const now = Date.now();
+  holds = holds.filter((x) => x.until > now);
+  return holds.reduce((s, x) => deepMerge(s, x.patch), incoming);
+}
+function change(patch) {
+  holds.push({ patch, until: Date.now() + HOLD_MS });
+  state = deepMerge(state, patch);
+  render();
+  setTimeout(() => { if (serverState) { state = applyHolds(serverState); render(); } }, HOLD_MS + 50);
+}
+function receive(incoming) {
+  serverState = incoming;
+  state = applyHolds(incoming);
   render();
 }
+
+function setStrip(patch) {
+  change({ strip: patch, ambiance: null });
+  sendStrip(patch);
+}
 function setBulb(patch) {
-  state.bulb = deepMerge(state.bulb, patch);
-  state.ambiance = null;
+  change({ bulb: patch, ambiance: null });
   sendBulb(patch);
-  render();
 }
 async function post(path, body, okMessage) {
   try {
@@ -326,8 +346,7 @@ const scenesPanel = {
 };
 
 async function applyAmbiance(id) {
-  state.ambiance = id;
-  render();
+  change({ ambiance: id });
   await post("/api/ambiance", { id });
 }
 
@@ -450,7 +469,7 @@ const bulbPanel = {
 
     fill(this.el, 
       linked ? h("div", { class: "banner" }, "The bulb is following the strip's colors. ",
-        h("button", { class: "btn ghost", onclick: () => post("/api/link", { on: false }) }, "Control it separately")) : null,
+        h("button", { class: "btn ghost", onclick: () => { change({ link: false, ambiance: null }); post("/api/link", { on: false }); } }, "Control it separately")) : null,
       body);
   },
   update(b) {
@@ -764,15 +783,13 @@ function updateTimerLabel() {
 function setupChrome() {
   $("#masterPower").addEventListener("click", () => {
     const on = !(state.strip.power || state.bulb.power);
-    state.strip.power = on;
-    state.bulb.power = on;
-    render();
+    change({ strip: { power: on }, bulb: { power: on } });
     post("/api/power", { on });
   });
   $("#linkToggle").addEventListener("change", (e) => {
-    state.link = e.target.checked;
-    render();
-    post("/api/link", { on: e.target.checked }, e.target.checked ? "Bulb now follows the strip" : null);
+    const on = e.target.checked;
+    change({ link: on, ambiance: null });
+    post("/api/link", { on }, on ? "Bulb now follows the strip" : "Bulb is controlled separately");
   });
 
   const pop = $("#timerPop"), btn = $("#timerBtn");
@@ -814,16 +831,25 @@ function render() {
   if (state.settings.led_count !== lastLedCount) { lastLedCount = state.settings.led_count; preview.layout(); }
 }
 
+// Live connection. Phones pause background tabs and can silently drop the stream, which
+// would leave stale switches on screen. So: resync whenever the page becomes visible again,
+// and reconnect if nothing has arrived for a while (preview frames normally arrive 15x/s).
+let es = null;
+let lastEventAt = 0;
+let offlineTimer = null;
+
 function connect() {
-  let offlineTimer = null;
-  const es = new EventSource("/api/events");
+  if (es) es.close();
+  lastEventAt = Date.now();
+  es = new EventSource("/api/events");
   es.addEventListener("state", (e) => {
-    state = JSON.parse(e.data);
+    lastEventAt = Date.now();
     clearTimeout(offlineTimer);
     $("#offline").hidden = true;
-    render();
+    receive(JSON.parse(e.data));
   });
   es.addEventListener("frame", (e) => {
+    lastEventAt = Date.now();
     const d = JSON.parse(e.data);
     preview.setFrame(d.s, d.b);
   });
@@ -833,19 +859,35 @@ function connect() {
   };
 }
 
+let resyncing = false;
+async function resync() {
+  if (resyncing) return;
+  resyncing = true;
+  try { receive(await api.get("/api/state")); } catch (_) { /* the stream's reconnect handles it */ }
+  connect();
+  resyncing = false;
+}
+
 async function init() {
   try {
-    [catalog, state] = await Promise.all([api.get("/api/catalog"), api.get("/api/state")]);
+    [catalog, serverState] = await Promise.all([api.get("/api/catalog"), api.get("/api/state")]);
   } catch (e) {
     $("#offline").hidden = false;
     setTimeout(init, 2000);
     return;
   }
+  state = serverState;
   setupChrome();
   preview.init();
   render();
   preview.layout();
   connect();
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") resync(); });
+  window.addEventListener("pageshow", (e) => { if (e.persisted) resync(); });
+  window.addEventListener("online", resync);
+  setInterval(() => {
+    if (document.visibilityState === "visible" && Date.now() - lastEventAt > 5000) resync();
+  }, 2000);
 }
 
 init();

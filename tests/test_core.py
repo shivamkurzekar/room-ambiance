@@ -195,6 +195,32 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(e._level, 0.0)
         self.assertFalse(e.snapshot()["status"]["strip"]["active"])
 
+    def test_unsync_keeps_the_color_the_bulb_was_showing(self):
+        e = self.engine
+        e.update_bulb({"power": False})            # bulb was off before syncing
+        e.set_link(True)
+        self.assertTrue(e.snapshot()["bulb"]["power"])
+        e._bulb_display = (128.0, 32.0, 64.0)      # what the bulb was mirroring
+        e.set_link(False)
+        b = e.snapshot()["bulb"]
+        self.assertEqual((b["power"], b["mode"], b["color"], b["brightness"]), (True, "color", "#ff4080", 50))
+        self.assertTrue(e._bulb_dirty)              # and that state gets sent to the bulb
+
+    def test_unsync_with_dark_strip_turns_bulb_off(self):
+        e = self.engine
+        e.set_link(True)
+        e._bulb_display = None
+        e.set_link(False)
+        self.assertFalse(e.snapshot()["bulb"]["power"])
+
+    def test_link_off_when_already_off_changes_nothing(self):
+        e = self.engine
+        e.update_bulb({"power": True, "mode": "white", "temp": 3000})
+        e._bulb_display = (10.0, 200.0, 10.0)
+        e.set_link(False)
+        b = e.snapshot()["bulb"]
+        self.assertEqual((b["mode"], b["temp"]), ("white", 3000))
+
     def test_timer_turns_everything_off(self):
         e = self.engine
         e.update_strip({"power": True})

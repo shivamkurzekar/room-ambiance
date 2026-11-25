@@ -22,7 +22,8 @@ from .catalog import AMBIANCE_BY_ID, AMBIANCES, WIZ_SCENE_COLOR, WIZ_SCENE_IDS, 
 from .color import (PALETTE_HEX, average, clamp, hex_to_rgb, is_hex_color, kelvin_to_rgb,
                     normalize_hex, rgb_to_hex, scale)
 from .config import MAX_LEDS, load_config, save_json
-from .devices import AmbilightMonitor, StripOutput, WizBulb, detect_local_ip, discover_bulbs
+from .devices import (AmbilightMonitor, StripOutput, WizBulb, detect_local_ip, discover_bulbs,
+                      rgb_to_wiz)
 from .effects import EFFECTS, Ctx, get_effect, speed_to_rate
 from .effects import catalog as effect_catalog
 
@@ -320,8 +321,25 @@ class Engine:
             self._changed()
 
     def set_link(self, on: bool) -> None:
+        """Sync the bulb to the strip, or hand it back.
+
+        Turning sync off keeps the bulb showing the color it had while synced, instead of
+        jumping back to an older (possibly "off") state, which felt like the switch worked
+        backwards. Turning sync on marks the bulb as on for the same reason.
+        """
         on = _bool(on, "link")
         with self.lock:
+            bulb = self.state["bulb"]
+            if on:
+                bulb["power"] = True
+            elif self.state["link"]:
+                shown = self._bulb_display
+                if shown is not None and max(shown) >= 4:
+                    wiz = rgb_to_wiz(shown)
+                    bulb.update({"power": True, "mode": "color", "brightness": wiz["dimming"],
+                                 "color": rgb_to_hex((wiz["r"], wiz["g"], wiz["b"]))})
+                else:
+                    bulb["power"] = False   # the strip was off or dark, so the bulb was too
             self.state["link"] = on
             self.state["ambiance"] = None
             self._bulb_dirty = True
