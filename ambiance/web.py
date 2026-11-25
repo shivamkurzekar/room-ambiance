@@ -16,6 +16,7 @@ from .engine import Engine, ValidationError
 
 log = logging.getLogger("ambiance.web")
 MAX_BODY = 64 * 1024
+mimetypes.add_type("application/manifest+json", ".webmanifest")
 
 
 class AmbianceServer(ThreadingHTTPServer):
