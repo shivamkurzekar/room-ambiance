@@ -11,6 +11,7 @@ import copy
 import ipaddress
 import json
 import logging
+import math
 import queue
 import threading
 import time
@@ -30,9 +31,30 @@ from .effects import catalog as effect_catalog
 log = logging.getLogger("ambiance.engine")
 
 STRIP_DEFAULT = {"power": False, "effect": "solid", "color": "#ff9a4d", "color2": "#5b6cff",
-                 "brightness": 60, "speed": 35, "params": {}}
+                 "brightness": 60, "trim": 0, "speed": 35, "params": {}}
 BULB_DEFAULT = {"power": True, "mode": "white", "color": "#ff9a4d", "temp": 2700, "brightness": 60,
-                "scene": 11, "scene_speed": 100, "effect": "breathe", "speed": 35, "params": {}}
+                "trim": 0, "scene": 11, "scene_speed": 100, "effect": "breathe", "speed": 35, "params": {}}
+# Changing only these keeps the current ambiance selected (e.g. switching the bulb off).
+AMBIANCE_KEEPING_KEYS = {"power", "trim"}
+STRIP_RANGE = (1, 100)
+BULB_RANGE = (10, 100)       # WiZ dimming can't go below 10
+
+
+def trimmed(base: float, trim: float, lo: float, hi: float) -> int:
+    """Apply the quick brightness knob to a base brightness.
+
+    trim is -100..100. 0 (the knob's middle) keeps the base, +100 reaches hi, -100 reaches
+    lo, and values in between scale linearly on each side, so the whole knob is always useful.
+    """
+    t = clamp(trim, -100, 100) / 100.0
+    value = base + (hi - base) * t if t >= 0 else base + (base - lo) * t
+    return int(math.floor(clamp(value, lo, hi) + 0.5))   # half up, same as JavaScript Math.round
+
+
+def link_gain(trim: float) -> float:
+    """Brightness multiplier for the bulb while it mirrors the strip (0.2x to 2x)."""
+    t = clamp(trim, -100, 100) / 100.0
+    return 1.0 + t if t >= 0 else 1.0 + 0.8 * t
 BULB_MODES = ("color", "white", "scene", "effect")
 PARAM_KEYS = {p["key"] for cls in EFFECTS.values() for p in cls.params}
 PUBLIC_SETTINGS = ("bulb_ip", "led_count", "fps", "max_brightness", "layout",
@@ -93,6 +115,8 @@ def clean_strip_patch(patch: dict) -> dict:
             out[k] = _color(v, k)
         elif k in ("brightness", "speed"):
             out[k] = _num(v, 1, 100, k)
+        elif k == "trim":
+            out[k] = _num(v, -100, 100, k)
         elif k == "effect":
             if v not in EFFECTS:
                 raise ValidationError(f"unknown effect {v!r}")
@@ -119,6 +143,8 @@ def clean_bulb_patch(patch: dict) -> dict:
             out[k] = _num(v, 2200, 6500, k)
         elif k == "brightness":
             out[k] = _num(v, 10, 100, k)
+        elif k == "trim":
+            out[k] = _num(v, -100, 100, k)
         elif k == "scene":
             s = _num(v, -1e9, 1e9, k)
             if s not in WIZ_SCENE_IDS:
@@ -306,18 +332,21 @@ class Engine:
 
     # ---------------------------------------------------------------- mutations
     def update_strip(self, patch: dict) -> None:
-        clean = clean_strip_patch(patch)
-        with self.lock:
-            _apply(self.state["strip"], clean)
-            self.state["ambiance"] = None
-            self._changed()
+        self._update("strip", clean_strip_patch(patch))
 
     def update_bulb(self, patch: dict) -> None:
-        clean = clean_bulb_patch(patch)
+        self._update("bulb", clean_bulb_patch(patch))
+
+    def _update(self, device: str, clean: dict) -> None:
+        if "brightness" in clean and "trim" not in clean:
+            clean["trim"] = 0          # a new base brightness recentres the quick knob
+        keeps_ambiance = set(clean) <= AMBIANCE_KEEPING_KEYS
         with self.lock:
-            _apply(self.state["bulb"], clean)
-            self.state["ambiance"] = None
-            self._bulb_dirty = True
+            _apply(self.state[device], clean)
+            if not keeps_ambiance:
+                self.state["ambiance"] = None
+            if device == "bulb":
+                self._bulb_dirty = True
             self._changed()
 
     def set_link(self, on: bool) -> None:
@@ -336,7 +365,7 @@ class Engine:
                 shown = self._bulb_display
                 if shown is not None and max(shown) >= 4:
                     wiz = rgb_to_wiz(shown)
-                    bulb.update({"power": True, "mode": "color", "brightness": wiz["dimming"],
+                    bulb.update({"power": True, "mode": "color", "brightness": wiz["dimming"], "trim": 0,
                                  "color": rgb_to_hex((wiz["r"], wiz["g"], wiz["b"]))})
                 else:
                     bulb["power"] = False   # the strip was off or dark, so the bulb was too
@@ -370,6 +399,7 @@ class Engine:
             strip, bulb = copy.deepcopy(self.state["strip"]), copy.deepcopy(self.state["bulb"])
             _apply(strip, clean_strip_patch(copy.deepcopy(preset.get("strip", {}))))
             _apply(bulb, clean_bulb_patch(copy.deepcopy(preset.get("bulb", {}))))
+            strip["trim"] = bulb["trim"] = 0       # quick knobs back to the middle
             self.state["strip"], self.state["bulb"] = strip, bulb
             self.state["link"] = bool(preset.get("link", False))
             self.state["ambiance"] = ambiance_id
@@ -384,10 +414,14 @@ class Engine:
         with self.lock:
             if len(self.state["custom_ambiances"]) >= MAX_CUSTOM:
                 raise ValidationError(f"you can save up to {MAX_CUSTOM} ambiances")
+            # Save what you actually see: fold the quick knobs into the stored brightness.
+            strip, bulb = copy.deepcopy(self.state["strip"]), copy.deepcopy(self.state["bulb"])
+            strip["brightness"] = trimmed(strip["brightness"], strip.get("trim", 0), *STRIP_RANGE)
+            bulb["brightness"] = trimmed(bulb["brightness"], bulb.get("trim", 0), *BULB_RANGE)
+            strip["trim"] = bulb["trim"] = 0
             entry = {"id": "custom-" + uuid.uuid4().hex[:8], "name": name, "subtitle": "Saved by you",
-                     "swatch": swatch_for(self.state["strip"]), "custom": True,
-                     "strip": copy.deepcopy(self.state["strip"]), "bulb": copy.deepcopy(self.state["bulb"]),
-                     "link": self.state["link"]}
+                     "swatch": swatch_for(strip), "custom": True,
+                     "strip": strip, "bulb": bulb, "link": self.state["link"]}
             self.state["custom_ambiances"].append(entry)
             self.state["ambiance"] = entry["id"]
             self._changed()
@@ -444,12 +478,25 @@ class Engine:
             derived = pilot_to_bulb(res)
             if not derived.get("power", True):
                 derived = {"power": False}
+            # The bulb reports the brightness after the quick knob; only a different value is
+            # an outside change, and then it becomes the new base with the knob recentred.
+            if "brightness" in derived:
+                if derived["brightness"] == trimmed(b["brightness"], b.get("trim", 0), *BULB_RANGE):
+                    del derived["brightness"]
+                else:
+                    derived["trim"] = 0
             changes = {k: v for k, v in derived.items() if b.get(k) != v}
             if not changes:
                 return
             b.update(changes)
-            self.state["ambiance"] = None
+            if not set(changes) <= AMBIANCE_KEEPING_KEYS:
+                self.state["ambiance"] = None
             self._changed()
+
+    @staticmethod
+    def _bulb_effective(b: dict) -> dict:
+        """The bulb state with the quick brightness knob applied."""
+        return {**b, "brightness": trimmed(b["brightness"], b.get("trim", 0), *BULB_RANGE)}
 
     @staticmethod
     def _bulb_static_params(b: dict) -> dict:
@@ -568,7 +615,8 @@ class Engine:
         display = None
         if self._level > 0:
             frame = self._render("strip", strip, n, dt, now)
-            p = strip["brightness"] / 100.0 * self._level * timer_k
+            base = trimmed(strip["brightness"], strip.get("trim", 0), *STRIP_RANGE)
+            p = base / 100.0 * self._level * timer_k
             display = [scale(c, p) for c in frame]
             wk = p * p * cap   # perceptual curve: the eye sees p, the LEDs get p squared
             wire = bytes(int(clamp(v * wk + 0.5, 0, 255)) for c in frame for v in c)
@@ -583,25 +631,29 @@ class Engine:
             self._last_wire = None
 
         # ---- bulb
+        eff = self._bulb_effective(bulb)
         if link:
-            avg = average(display) if display else None
+            avg = None
+            if display and bulb["power"]:   # the bulb's own switch still works while synced
+                g = link_gain(bulb.get("trim", 0))
+                avg = tuple(min(255.0, v * g) for v in average(display))
             self.bulb.stream(avg)
             self._bulb_display = avg
             self._bulb_dirty = False
         elif bulb["power"] and bulb["mode"] == "effect":
-            c = scale(self._render("bulb", bulb, 1, dt, now)[0], bulb["brightness"] / 100.0 * timer_k)
+            c = scale(self._render("bulb", bulb, 1, dt, now)[0], eff["brightness"] / 100.0 * timer_k)
             self.bulb.stream(c)
             self._bulb_display = c
             self._bulb_dirty = False
         else:
             if self._bulb_dirty:
                 self._bulb_dirty = False
-                self.bulb.set_pilot(self._bulb_static_params(bulb))
+                self.bulb.set_pilot(self._bulb_static_params(eff))
                 self._bulb_resend_at = now + 1.2          # UDP has no delivery guarantee
             elif self._bulb_resend_at is not None and now >= self._bulb_resend_at:
                 self._bulb_resend_at = None
-                self.bulb.set_pilot(self._bulb_static_params(bulb))
-            self._bulb_display = self._bulb_static_display(bulb)
+                self.bulb.set_pilot(self._bulb_static_params(eff))
+            self._bulb_display = self._bulb_static_display(eff)
         return display
 
     def _count_frame(self, now: float) -> None:

@@ -240,6 +240,63 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(e.monitor.local_ip, real_ip)
         self.assertEqual(e.snapshot()["server"]["local_ip"], real_ip)
 
+    def test_quick_knob_mapping(self):
+        from ambiance.engine import trimmed
+        self.assertEqual(trimmed(55, 0, 1, 100), 55)       # middle keeps the ambiance level
+        self.assertEqual(trimmed(55, 100, 1, 100), 100)    # far right reaches the maximum
+        self.assertEqual(trimmed(55, -100, 1, 100), 1)     # far left reaches the minimum
+        self.assertEqual(trimmed(55, 50, 1, 100), 78)      # halfway up the right side
+        self.assertEqual(trimmed(40, -100, 10, 100), 10)   # bulb minimum is 10
+
+    def test_device_switches_and_knobs_keep_the_ambiance(self):
+        e = self.engine
+        e.apply_ambiance("ocean")
+        e.update_bulb({"power": False})
+        e.update_strip({"trim": -40})
+        snap = e.snapshot()
+        self.assertEqual(snap["ambiance"], "ocean")
+        self.assertFalse(snap["bulb"]["power"])
+        self.assertEqual(snap["strip"]["trim"], -40)
+        e.update_strip({"brightness": 30})                 # a new base: knob recentres
+        snap = e.snapshot()
+        self.assertEqual((snap["strip"]["trim"], snap["ambiance"]), (0, None))
+
+    def test_new_ambiance_recentres_knobs_and_save_bakes_them(self):
+        e = self.engine
+        e.apply_ambiance("warm-evening")                    # strip 45, bulb 45
+        e.update_strip({"trim": 50})
+        e.update_bulb({"trim": -100})
+        saved = e.save_ambiance("Mine")
+        self.assertEqual((saved["strip"]["brightness"], saved["strip"]["trim"]), (73, 0))
+        self.assertEqual((saved["bulb"]["brightness"], saved["bulb"]["trim"]), (10, 0))
+        e.apply_ambiance("reading")
+        snap = e.snapshot()
+        self.assertEqual((snap["strip"]["trim"], snap["bulb"]["trim"]), (0, 0))
+
+    def test_bulb_switch_works_while_synced(self):
+        e = self.engine
+        e.update_strip({"power": True, "effect": "solid", "color": "#ff0000"})
+        e._level = 1.0
+        e.set_link(True)
+        e._tick(time.monotonic(), 0.03)
+        self.assertIsNotNone(e._bulb_display)
+        e.update_bulb({"power": False})
+        e._tick(time.monotonic(), 0.03)
+        self.assertIsNone(e._bulb_display)
+
+    def test_bulb_report_matching_the_knob_is_not_an_outside_change(self):
+        e = self.engine
+        e.update_bulb({"power": True, "mode": "white", "temp": 2700, "brightness": 50})
+        e.update_bulb({"trim": 40})                         # effective 70
+        e._bulb_dirty = False
+        e.bulb.last_command = 0
+        e._on_bulb_pilot({"state": True, "sceneId": 0, "temp": 2700, "dimming": 70})
+        b = e.snapshot()["bulb"]
+        self.assertEqual((b["brightness"], b["trim"]), (50, 40))
+        e._on_bulb_pilot({"state": True, "sceneId": 0, "temp": 2700, "dimming": 30})   # WiZ app
+        b = e.snapshot()["bulb"]
+        self.assertEqual((b["brightness"], b["trim"]), (30, 0))
+
     def test_timer_turns_everything_off(self):
         e = self.engine
         e.update_strip({"power": True})

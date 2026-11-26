@@ -351,3 +351,26 @@ input[type="text"]:focus, input[type="number"]:focus, select:focus { border-colo
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* ------------------------------------------------------------------ quick controls (under the preview) */
+.quick { display: grid; gap: 10px; padding: 4px 16px 16px; }
+.quick-row { display: grid; grid-template-columns: 64px auto 1fr 52px; align-items: center; gap: 12px; }
+.quick-name { font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 7px; }
+.quick-name .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); transition: background 0.3s, box-shadow 0.3s; }
+.quick-row.on .quick-name .dot { background: var(--c, var(--accent)); box-shadow: 0 0 10px var(--c, var(--accent)); }
+.quick-val {
+  justify-self: end; font-size: 13px; font-variant-numeric: tabular-nums; color: var(--text);
+  border: 0; background: none; padding: 4px 0; border-radius: 6px;
+}
+.quick-val.trimmed { color: var(--accent); cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
+.quick-row:not(.on) .knob, .quick-row:not(.on) .quick-val { opacity: 0.4; }
+.knob { position: relative; }
+.knob::before {   /* centre mark = the ambiance's own brightness */
+  content: ""; position: absolute; left: 50%; top: 50%; width: 2px; height: 14px;
+  transform: translate(-50%, -50%); border-radius: 1px; background: rgba(255, 255, 255, 0.35); pointer-events: none;
+}
+.knob input[type="range"]::-webkit-slider-runnable-track {
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.12) 0 var(--a, 50%), var(--accent) var(--a, 50%) var(--b, 50%), rgba(255, 255, 255, 0.12) var(--b, 50%) 100%);
+}
+.knob input[type="range"]::-moz-range-progress { background: transparent; }
+@media (max-width: 420px) { .quick-row { grid-template-columns: 54px auto 1fr 44px; gap: 9px; } }

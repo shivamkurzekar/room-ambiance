@@ -155,13 +155,25 @@ function receive(incoming) {
   render();
 }
 
+// Switching a light on/off or using its quick brightness knob keeps the ambiance selected;
+// any other change makes the look "custom". Mirrors AMBIANCE_KEEPING_KEYS on the server.
+const keepsAmbiance = (patch) => Object.keys(patch).every((k) => k === "power" || k === "trim");
+
 function setStrip(patch) {
-  change({ strip: patch, ambiance: null });
+  change(keepsAmbiance(patch) ? { strip: patch } : { strip: patch, ambiance: null });
   sendStrip(patch);
 }
 function setBulb(patch) {
-  change({ bulb: patch, ambiance: null });
+  change(keepsAmbiance(patch) ? { bulb: patch } : { bulb: patch, ambiance: null });
   sendBulb(patch);
+}
+
+// Same mapping as the server's trimmed(): knob -100..100, middle = the base brightness.
+const STRIP_RANGE = [1, 100], BULB_RANGE = [10, 100];
+function trimmed(base, trim, [lo, hi]) {
+  const t = Math.max(-100, Math.min(100, trim || 0)) / 100;
+  const v = t >= 0 ? base + (hi - base) * t : base + (base - lo) * t;
+  return Math.round(Math.max(lo, Math.min(hi, v)));
 }
 async function post(path, body, okMessage) {
   try {
@@ -366,7 +378,7 @@ const stripPanel = {
     this.power = h("input", { type: "checkbox", class: "switch", "aria-label": "Strip power",
       onchange: (e) => setStrip({ power: e.target.checked }) });
     this.sub = h("div", { class: "muted small" });
-    this.bright = Slider({ label: "Brightness", min: 1, max: 100, unit: "%", onInput: (v) => setStrip({ brightness: v }) });
+    this.bright = Slider({ label: "Brightness", min: 1, max: 100, unit: "%", onInput: (v) => setStrip({ brightness: v, trim: 0 }) });
     this.fxBtns = catalog.effects.map((e) => h("button", {
       class: "fx", onclick: () => setStrip({ effect: e.id, power: true }),
     }, h("div", { class: "fx-name" }, e.name), h("div", { class: "fx-desc" }, e.description)));
@@ -394,8 +406,8 @@ const stripPanel = {
   },
   update(s, fx) {
     this.power.checked = s.power;
-    this.sub.textContent = s.power ? `${fx.name} at ${s.brightness}%` : "Off";
-    this.bright.set(s.brightness);
+    this.sub.textContent = s.power ? `${fx.name} at ${trimmed(s.brightness, s.trim, STRIP_RANGE)}%` : "Off";
+    this.bright.set(trimmed(s.brightness, s.trim, STRIP_RANGE));
     this.fxBtns.forEach((b, i) => b.classList.toggle("active", catalog.effects[i].id === s.effect));
     if (this.speed) this.speed.set(s.speed);
     this.params.forEach(([p, c]) => c.set(paramValue(fx, s.params, p.key)));
@@ -421,7 +433,7 @@ const bulbPanel = {
     this.power = h("input", { type: "checkbox", class: "switch", "aria-label": "Bulb power",
       onchange: (e) => setBulb({ power: e.target.checked }) });
     this.sub = h("div", { class: "muted small" });
-    this.bright = Slider({ label: "Brightness", min: 10, max: 100, unit: "%", onInput: (v) => setBulb({ brightness: v }) });
+    this.bright = Slider({ label: "Brightness", min: 10, max: 100, unit: "%", onInput: (v) => setBulb({ brightness: v, trim: 0 }) });
     const modes = [["color", "Color"], ["white", "White"], ["scene", "Scenes"], ["effect", "Effects"]];
     const modeSeg = Seg(modes, b.mode, (m) => setBulb({ mode: m, power: true }));
 
@@ -476,8 +488,9 @@ const bulbPanel = {
     this.power.checked = b.power;
     const st = state.status.bulb;
     const modeText = { color: "Color", white: `White ${b.temp}K`, scene: (catalog.wiz_scenes.find((s) => s.id === b.scene) || {}).name, effect: effectById(b.effect).name }[b.mode];
-    this.sub.textContent = !st.online ? "Not responding" : state.link ? "Synced to strip" : b.power ? `${modeText} at ${b.brightness}%` : "Off";
-    this.bright.set(b.brightness);
+    const eff = trimmed(b.brightness, b.trim, BULB_RANGE);
+    this.sub.textContent = !st.online ? "Not responding" : state.link ? "Synced to strip" : b.power ? `${modeText} at ${eff}%` : "Off";
+    this.bright.set(eff);
     if (this.picker) this.picker.set(b.color);
     if (this.temp) this.temp.set(b.temp);
     this.whiteBtns.forEach(([k, el]) => el.classList.toggle("active", k === b.temp));
@@ -555,6 +568,62 @@ const settingsPanel = {
       ...row("Open on your phone", srv.url),
       ...row("Version", srv.version + (srv.dry_run ? " (dry run)" : "")),
     );
+  },
+};
+
+// ------------------------------------------------------------------ quick controls (under the preview)
+// Per-device on/off and a brightness knob whose middle is the ambiance's own brightness.
+const linkGain = (trim) => { const t = (trim || 0) / 100; return t >= 0 ? 1 + t : 1 + 0.8 * t; };
+
+const quickPanel = {
+  el: $("#quick"),
+  rows: null,
+  render() {
+    if (!this.rows) this.build();
+    this.update();
+  },
+  build() {
+    const row = (device, label, range, set) => {
+      const power = h("input", { type: "checkbox", class: "switch", "aria-label": `${label} on or off`,
+        onchange: (e) => set({ power: e.target.checked }) });
+      const input = h("input", { type: "range", min: -100, max: 100, step: 1, "aria-label": `${label} brightness` });
+      const val = h("button", { class: "quick-val", title: "Tap to go back to the ambiance's brightness",
+        onclick: () => { if (state[device].trim) set({ trim: 0 }); } });
+      const el = h("div", { class: "quick-row" },
+        h("div", { class: "quick-name" }, h("span", { class: "dot" }), label), power, h("div", { class: "knob" }, input), val);
+      const paint = () => {
+        const p = (+input.value + 100) / 2;
+        input.style.setProperty("--a", `${Math.min(50, p)}%`);
+        input.style.setProperty("--b", `${Math.max(50, p)}%`);
+      };
+      const release = () => busy.delete(input);
+      input.addEventListener("pointerdown", () => busy.add(input));
+      input.addEventListener("pointerup", release);
+      input.addEventListener("pointercancel", release);
+      input.addEventListener("change", release);
+      input.addEventListener("input", () => {
+        let v = +input.value;
+        if (Math.abs(v) <= 4) { v = 0; input.value = "0"; }   // a gentle snap to the middle
+        paint();
+        set({ trim: v });
+      });
+      return { device, range, el, power, input, val, paint };
+    };
+    this.rows = [row("strip", "Strip", STRIP_RANGE, setStrip), row("bulb", "Bulb", BULB_RANGE, setBulb)];
+    fill(this.el, this.rows.map((r) => r.el));
+  },
+  update() {
+    for (const r of this.rows) {
+      const d = state[r.device];
+      const trim = d.trim || 0;
+      r.el.classList.toggle("on", !!d.power);
+      r.power.checked = !!d.power;
+      if (!busy.has(r.input)) { r.input.value = String(trim); r.paint(); }
+      const synced = r.device === "bulb" && state.link;
+      r.val.textContent = synced ? `${Math.round(linkGain(trim) * 100)}%` : `${trimmed(d.brightness, trim, r.range)}%`;
+      r.val.title = synced ? "Bulb brightness relative to the strip. Tap to reset." : "Tap to go back to the ambiance's brightness";
+      r.val.classList.toggle("trimmed", trim !== 0);
+    }
   },
 };
 
@@ -824,6 +893,7 @@ let lastLedCount = null;
 function render() {
   if (!state || !catalog) return;
   renderChrome();
+  quickPanel.render();
   scenesPanel.render();
   stripPanel.render();
   bulbPanel.render();
